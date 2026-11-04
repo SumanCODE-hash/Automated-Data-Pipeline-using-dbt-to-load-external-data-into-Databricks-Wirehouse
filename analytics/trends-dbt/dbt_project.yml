@@ -1,0 +1,26 @@
+name: 'trends_dbt'
+version: '1.0.0'
+config-version: 2
+
+profile: 'trends-dbt'
+
+seed-paths: ["seeds"]
+model-paths: ["models"]
+macro-paths: ["macros"]
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+seeds:
+  trends_dbt:
+    +enabled: true
+
+models:
+  trends_dbt:
+    +static_analysis: "off"
+    # Target files matching their filenames directly within the root models/ folder layout
+    stg_daily_trends:
+      +materialized: view
+    historical_trends:
+      +materialized: table
+    

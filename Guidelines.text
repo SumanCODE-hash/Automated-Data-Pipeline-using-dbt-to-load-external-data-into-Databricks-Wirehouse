@@ -1,0 +1,195 @@
+
+Local to Databricks Data Pipeline: Complete Architecture Documentation
+
+This documentation serves as a comprehensive guide for your automated data pipeline, which extracts high-density Google Trends data across 13 European nations via Google BigQuery, downloads it locally, and orchestrates schema transformations within a Databricks SQL Warehouse using dbt Core.
+
+1. Project Architecture Overview
+
+The pipeline utilizes a hybrid-cloud design optimized to remain completely within free tier parameters while scaling cleanly:
+[Google BigQuery] ────(Python Client Extraction)────> [Local Environment]
+                                                            │
+                                                     (dbt seed Upload)
+                                                            ▼
+[Databricks Unity Catalog] <───(dbt transformations)─── [Databricks SQL Warehouse]
+
+Workspace Directory Layout
+
+text
+your-project-root/
+├── .venv/                      # Fast virtual environment isolated via UV
+├── gcp-key.json                # Google Cloud Service Account JSON credentials
+├── run_pipeline.py             # Orchestrator (BigQuery Extract -> File Drop -> dbt execution)
+└── analytics/                  # The isolated dbt core project directory
+    ├── dbt_project.yml         # Core dbt configuration mapping
+    ├── models/                 # Transformation SQL scripts (.sql files)
+    └── seeds/                  # Target destination for the 'raw_trends.csv' file
+Use code with caution.
+
+2. Dynamic Orchestration Script (run_pipeline.py)
+
+This standalone Python script runs locally within your uv environment. It queries the BigQuery public partition safely, manages relative path resolutions natively, and forwards downstream execution directly to the dbt project folder.
+python
+import os
+import subprocess
+from google.cloud import bigquery
+import pandas as pd
+
+def download_trends_data():
+    """Authenticates with GCP, processes the partitioned query, and dumps data to local seed path."""
+    client = bigquery.Client()
+
+    # Query covering 13 European nations with a deterministic 2-day historical offset
+    query = """
+    SELECT 
+        country_name, 
+        term, 
+        rank, 
+        percent_gain,
+        refresh_date AS snapshot_date
+    FROM `bigquery-public-data.google_trends.international_top_rising_terms`
+    WHERE 
+        country_name IN (
+            'United Kingdom', 'Germany', 'France', 'Italy', 'Spain', 
+            'Denmark', 'Sweden', 'Norway', 'Finland', 'Netherlands', 
+            'Belgium', 'Switzerland', 'Austria'
+        )
+        AND rank <= 20
+        AND refresh_date = DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+    GROUP BY term, country_name, rank, percent_gain, refresh_date
+    ORDER BY country_name ASC, rank ASC;
+    """
+    
+    print("🚀 Executing BigQuery extraction...")
+    df = client.query(query).to_dataframe()
+    
+    # Path resolution mapping directly into the analytics project seed context
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_path = os.path.join(base_dir, "analytics", "seeds", "raw_trends.csv")
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"✅ Success! Saved {len(df)} rows locally to: {output_path}")
+
+def run_pipeline_dbt():
+    """Triggers the dbt engine context-switched inside the analytics directory."""
+    print("🛠️ Initiating local dbt transformations...")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    dbt_project_dir = os.path.join(base_dir, "analytics")
+    
+    result = subprocess.run(
+        ["dbt", "run"], 
+        cwd=dbt_project_dir, 
+        capture_output=True, 
+        text=True
+    )
+    
+    print(result.stdout)
+    if result.returncode != 0:
+        print("❌ dbt failed with errors:")
+        print(result.stderr)
+    else:
+        print("🎉 dbt pipeline executed successfully!")
+
+if __name__ == "__main__":
+    download_trends_data()
+    run_pipeline_dbt()
+Use code with caution.
+
+3. Connecting dbt Core to Databricks
+
+To execute queries against a Databricks SQL Warehouse, dbt uses a global profile configuration mapping file.
+
+Locating Your Profile
+
+The profile file must be created or modified at your operating system's root home pathway:
+~/.dbt/profiles.yml
+
+Connection Configuration Template
+
+yaml
+# ~/.dbt/profiles.yml
+analytics_project:
+  outputs:
+    dev:
+      type: databricks
+      schema: daily_trends_dev        # Target database schema inside Databricks
+      catalog: main                   # Databricks Unity Catalog name
+      host: ://databricks.com # Found in Connection Details tab of SQL Warehouse
+      http_path: /sql/1.0/warehouses/xxxxx  # Unique ID path of your SQL Warehouse
+      token: dapiXXXXXXXXXXXXXXXXXXXX # Databricks Personal Access Token (PAT)
+  target: dev
+Use code with caution.
+
+Retrieving Credentials from Databricks UI
+
+1. Navigate to SQL Warehouses in your Databricks sidebar workspace.
+2. Select your active warehouse → click the Connection details tab.
+3. Copy the Server hostname and HTTP path values straight into your profiles.yml.
+4. Generate a secure access token under User Settings → Developer → Access tokens → Generate token.
+
+4. End-to-End Operational Lifecycle Steps
+
+Execute these steps in order when initializing or resetting the state of your production environment:
+
+Step 1: Set Google Credentials Environment Variables
+
+The BigQuery client requires active environment hooks. Run the command matching your terminal environment before running python execution scripts:
+• Linux/macOS/Git Bash: export GOOGLE_APPLICATION_CREDENTIALS="gcp-key.json"
+• Windows PowerShell: $env:GOOGLE_APPLICATION_CREDENTIALS="gcp-key.json"
+
+Step 2: Initialize dbt Setup Context
+
+bash
+cd analytics
+dbt init .
+Use code with caution.
+(The dot . initializes components right inside the current folder).
+
+Step 3: Populate the Local File System Cache
+
+bash
+python ../run_pipeline.py
+Use code with caution.
+This initial run creates the raw_trends.csv template within the /seeds folder directory.
+
+Step 4: Parse and Register Seeds into Databricks Tables
+
+bash
+dbt seed
+Use code with caution.
+This parses the physical local CSV structure and ships it directly into your Databricks catalog as a foundational column-oriented table named raw_trends.
+
+Step 5: Test the Cloud Integrity Vector
+
+bash
+dbt debug
+Use code with caution.
+Confirms profile mapping links, directory structures, and compute warehouse channels match securely.
+
+5. Architectural Traps & Terminologies Developers Often Miss
+
+Building an automated pipeline involves structural concepts that developers frequently overlook, resulting in elevated compute bills, structural table locks, or unmaintainable source code.
+
+📊 Data Latency & Partition Pruning
+
+• What it means: Public datasets often have ingestion delays (latency) before updating. Filtering by a partition column (like refresh_date) ensures you search data boundaries quickly.
+• The Pitfall: Many developers search entire tables using generic functions like CURRENT_DATE(). Because public tables aren't indexed on real-time execution dates, this causes large data scans. Using an explicit historical offset (INTERVAL 2 DAY) gives upstream providers time to fully update tables while cutting data usage costs down drastically.
+
+🔗 ELT vs. ETL Architecture
+
+• What it means: ETL (Extract, Transform, Load) transforms data using a separate server before saving it. ELT (Extract, Load, Transform) loads raw data straight into the warehouse first, letting the powerful cloud engine handle the heavy processing via SQL.
+• The Pitfall: Developers sometimes try to make dbt download data locally, transform it with Python, and push it back up. Since dbt is fundamentally built as an ELT engine, the correct pattern is to treat your pipeline script strictly as the data delivery vehicle, letting dbt handle the transformations natively within your Databricks data warehouse.
+
+🌱 Misusing Seeds for Production Data Ingestion
+
+• What it means: The dbt seed feature is built to version-control small, static lookup tables (like postal code mappings or static country conversions).
+• The Pitfall: Using dbt seed as an automated tool to ingest large streams of moving transaction data can cause performance bottlenecks. Git repositories are not built to version-control rapidly shifting production datasets. For rolling historical trend tracking, transition your extraction code away from local CSV paths and use streaming targets like Databricks Volumes or direct cloud stage buckets instead.
+
+🔄 Idempotency and Pipeline Resiliency
+
+• What it means: A pipeline is idempotent if running it multiple times on the same input data always produces the exact same result without generating duplicate rows or corrupt entries.
+• The Pitfall: If your script simply appends data blindly every time it runs, a minor network issue could cause it to run twice and corrupt your metrics. Designing queries with explicit GROUP BY deduplication structures or setting up clear table drops ensures your pipeline can safely self-heal from unexpected system drops.
+Now that your local dbt-to-Databricks connection framework is documented, what should we build next? I can help you write your first SQL transformation model inside the /models directory to clean up these search terms, or we can look at setting up a local Task Scheduler cron job to automate this Python file completely every week.
+
+
+gcloud auth application-default login
