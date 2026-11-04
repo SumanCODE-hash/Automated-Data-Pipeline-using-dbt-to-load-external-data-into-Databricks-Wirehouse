@@ -1,2 +1,6 @@
 .vscode
+.python-version
 Guidelines.txt
+.pyproject.toml
+README.md
+uv.lock
